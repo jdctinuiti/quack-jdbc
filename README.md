@@ -21,6 +21,22 @@ familiar `jdbc:quack://` URL.
 > parity suite that checks column-type reporting against DuckDB's own
 > JDBC driver (`duckdb_jdbc`) as a behavioral oracle.
 
+The development driver supports both Quack **v1** (DuckDB 1.5.x) and
+**v3** (DuckDB 2.0 development builds). The default `protocolVersion=auto`
+first sends a v1 handshake, then retries with v3 only when the server explicitly
+rejects v1 and requires v3. Authentication and HTTP failures are never retried
+as version negotiation. Protocol v2 is not supported. The protocol version is
+independent of the DuckDB release number. The JDBC driver remains pure Java,
+with no DuckDB native libraries or extensions on the client; matching native
+artifacts are needed only by the server used for integration tests.
+
+V3 connections send background heartbeats, use numbered fetches with completeness
+checks, acknowledge completed results, and cancel partially consumed results
+when closed. The driver also decodes DuckDB 2.0 string/blob vectors and uses
+`SEND_DATA` plus `FINALIZE` for `appendChunk()`. Close connections when finished
+to stop their heartbeat threads. A failed heartbeat invalidates the session;
+open a new connection rather than replaying a query or transaction automatically.
+
 ## Quickstart
 
 ### 1. Start a Quack server (DuckDB v1.5.3+)
@@ -107,6 +123,8 @@ jdbc:quack://host[:port][/database][?token=…&tls=…]
 | `useEncryption`      | false   | Alias for `tls` (matches the gizmosql-jdbc-driver convention).            |
 | `connectTimeout`     | 10      | HTTP connect timeout, as seconds or an ISO-8601 duration like `PT5S`.     |
 | `requestTimeout`     | 60      | Per-request HTTP timeout, as seconds or an ISO-8601 duration like `PT30S`. |
+| `protocolVersion`    | auto    | `auto`, `1`, or `3`; pin a dialect to skip automatic negotiation. |
+| `heartbeatTimeout`   | 60      | V3 heartbeat lease, as positive whole seconds. Heartbeats run every third of the accepted lease. |
 | `httpHeader.<Name>`  | (none)  | Extra HTTP header sent with every request (proxy/LB auth). Repeatable. Properties only — rejected on the URL. |
 
 These options can be set on the URL or via `java.util.Properties` passed
@@ -235,6 +253,27 @@ mvn test                       # unit + integration tests
 mvn -Dtest='!*Integration*' test   # unit only (no duckdb required)
 mvn -Poracle test              # also run the duckdb-jdbc parity suite
 ```
+
+To test a locally built DuckDB 2.0 / Quack v3 pair, including unsigned
+extensions, point the fixture at the matching CLI and extension directory:
+
+```bash
+QUACK_IT_DUCKDB=/absolute/path/to/duckdb \
+QUACK_IT_EXTENSION_DIR=/absolute/path/to/extensions \
+  mvn verify
+```
+
+The directory must contain `quack.duckdb_extension`. If it contains
+`httpfs.duckdb_extension`, the fixture loads it first for the server's crypto
+provider. This mode uses `-unsigned` and does not install extensions from the
+network. V3-specific tests exercise sessions beyond their heartbeat lease,
+zero inline rows, multiple fetch batches, and string/blob decoding. Run the
+suite against a v1 server as well to verify compatibility during upgrades.
+
+Custom `QuackTransport` implementations must support concurrent heartbeat and
+query requests for v3. When decoding a response to a `FetchRequest` whose
+`batchIndex` is present, use `MessageCodec.decode(bytes, 3)`; the default overload
+retains v1 fetch semantics. The built-in HTTP transport selects this automatically.
 
 Integration tests spawn a real DuckDB CLI as a Quack server and exercise
 the driver end-to-end: connection handshake, CRUD, multi-chunk fetches,

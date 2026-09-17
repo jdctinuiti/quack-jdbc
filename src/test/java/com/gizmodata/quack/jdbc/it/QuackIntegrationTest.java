@@ -45,6 +45,9 @@ public class QuackIntegrationTest {
         String pathEnv = System.getenv("PATH");
         if (pathEnv == null) return false;
         String binary = System.getenv().getOrDefault("QUACK_IT_DUCKDB", "duckdb");
+        if (java.nio.file.Path.of(binary).isAbsolute()) {
+            return java.nio.file.Files.isExecutable(java.nio.file.Path.of(binary));
+        }
         for (String entry : pathEnv.split(java.io.File.pathSeparator)) {
             java.nio.file.Path candidate = java.nio.file.Path.of(entry, binary);
             if (java.nio.file.Files.isExecutable(candidate)) {

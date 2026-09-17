@@ -85,8 +85,17 @@ public final class QuackDriver implements Driver {
         requestTimeout.description = "Per-request HTTP timeout as seconds or ISO-8601 duration (default: 60 seconds).";
         requestTimeout.required = false;
 
+        DriverPropertyInfo protocolVersion = new DriverPropertyInfo("protocolVersion",
+                info != null ? info.getProperty("protocolVersion", "auto") : "auto");
+        protocolVersion.description = "Quack wire protocol: auto negotiates v1 or v3.";
+        protocolVersion.choices = new String[]{"auto", "1", "3"};
+        DriverPropertyInfo heartbeatTimeout = new DriverPropertyInfo("heartbeatTimeout",
+                info != null ? info.getProperty("heartbeatTimeout", "60") : "60");
+        heartbeatTimeout.description = "V3 session heartbeat lease in whole seconds (default: 60).";
+
         return new DriverPropertyInfo[]{
-                token, password, tokenEnv, tokenFile, tls, connectTimeout, requestTimeout
+                token, password, tokenEnv, tokenFile, tls, connectTimeout, requestTimeout,
+                protocolVersion, heartbeatTimeout
         };
     }
 

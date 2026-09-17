@@ -6,6 +6,21 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- Quack protocol v3 support alongside v1: automatic negotiation, heartbeat
+  leases, client query UUIDs, numbered fetches with batch completeness checks,
+  result acknowledgements, and cancellation of partially consumed results.
+- DuckDB 2.0 string/blob vector decoding, including nested string values.
+- V3 bulk append through `SEND_DATA` and `FINALIZE` while retaining v1 append.
+- `protocolVersion` and `heartbeatTimeout` connection properties, and
+  `QUACK_IT_EXTENSION_DIR` for testing matching locally built server artifacts.
+
+### Fixed
+
+- Queries and update counts when the server returns no inline result chunks.
+- Integration fixtures now recognize absolute `QUACK_IT_DUCKDB` paths.
+
 ## [0.2.0-alpha.6] — 2026-07-29
 
 ### Fixed

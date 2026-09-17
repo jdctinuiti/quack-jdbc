@@ -13,6 +13,11 @@ public enum MessageType {
     APPEND_REQUEST(9),
     SUCCESS_RESPONSE(10),
     DISCONNECT_MESSAGE(11),
+    CANCEL_REQUEST(12),
+    FINALIZE(13),
+    SEND_DATA_RESPONSE(14),
+    ACKNOWLEDGEMENT(15),
+    HEARTBEAT_REQUEST(16),
     ERROR_RESPONSE(100);
 
     private final int wireId;

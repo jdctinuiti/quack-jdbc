@@ -54,7 +54,9 @@ public final class QuackServerFixture implements AutoCloseable {
         String token = DEFAULT_TOKEN;
         Path logFile = Files.createTempFile("quack-jdbc-it-", ".log");
 
-        ProcessBuilder pb = new ProcessBuilder(duckdb);
+        String extensionDir = System.getenv("QUACK_IT_EXTENSION_DIR");
+        ProcessBuilder pb = extensionDir == null ? new ProcessBuilder(duckdb)
+                : new ProcessBuilder(duckdb, "-unsigned");
         pb.redirectErrorStream(true);
         Process process = pb.start();
 
@@ -89,8 +91,16 @@ public final class QuackServerFixture implements AutoCloseable {
         try {
             writer.write(".mode csv\n");
             writer.write(".headers on\n");
-            writer.write("INSTALL quack;\n");
-            writer.write("LOAD quack;\n");
+            if (extensionDir == null) {
+                writer.write("INSTALL quack;\n");
+                writer.write("LOAD quack;\n");
+            } else {
+                Path extensions = Path.of(extensionDir).toAbsolutePath();
+                if (Files.exists(extensions.resolve("httpfs.duckdb_extension"))) {
+                    writer.write("LOAD '" + extensions.resolve("httpfs.duckdb_extension").toString().replace("'", "''") + "';\n");
+                }
+                writer.write("LOAD '" + extensions.resolve("quack.duckdb_extension").toString().replace("'", "''") + "';\n");
+            }
             writer.write("CALL quack_serve('quack:127.0.0.1:" + port + "', token=>'" + token + "');\n");
             writer.flush();
         } catch (IOException e) {
@@ -163,6 +173,7 @@ public final class QuackServerFixture implements AutoCloseable {
     }
 
     private static boolean isOnPath(String binary) {
+        if (Path.of(binary).isAbsolute()) return Files.isExecutable(Path.of(binary));
         String pathEnv = System.getenv("PATH");
         if (pathEnv == null) return false;
         for (String entry : pathEnv.split(java.io.File.pathSeparator)) {

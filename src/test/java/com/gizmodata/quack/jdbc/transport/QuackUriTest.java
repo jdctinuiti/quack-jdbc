@@ -4,6 +4,7 @@ import com.gizmodata.quack.jdbc.QuackException;
 import org.junit.jupiter.api.Test;
 
 import java.time.Duration;
+import java.util.List;
 import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -12,6 +13,19 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class QuackUriTest {
+
+    @Test
+    void protocolAndHeartbeatPropertiesRejectUnsupportedValues() {
+        assertEquals(0, QuackUri.parse("jdbc:quack://localhost").protocolVersion());
+        assertEquals(3, QuackUri.parse("jdbc:quack://localhost?protocolVersion=3").protocolVersion());
+        assertEquals(60, QuackUri.parse("jdbc:quack://localhost").heartbeatTimeoutSeconds());
+        assertThrows(QuackException.class,
+                () -> QuackUri.parse("jdbc:quack://localhost?protocolVersion=2").protocolVersion());
+        for (String invalid : List.of("0", "-1", "0.5", "9223372036854775807")) {
+            assertThrows(QuackException.class,
+                    () -> QuackUri.parse("jdbc:quack://localhost?heartbeatTimeout=" + invalid).heartbeatTimeoutSeconds());
+        }
+    }
 
     @Test
     void acceptsCanonicalUrl() {

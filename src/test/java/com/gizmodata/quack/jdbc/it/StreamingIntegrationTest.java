@@ -45,6 +45,12 @@ public class StreamingIntegrationTest {
     void startServer() throws Exception {
         server = QuackServerFixture.tryStart();
         assertNotNull(server);
+        try (QuackConnection c = connect(); Statement s = c.createStatement()) {
+            if (c.session().protocolVersion() == 3) {
+                s.execute("SET GLOBAL quack_prepare_inline_rows = 0");
+                s.execute("SET GLOBAL quack_target_batch_bytes = 16384");
+            }
+        }
     }
 
     @AfterAll
@@ -66,8 +72,9 @@ public class StreamingIntegrationTest {
              QuackSession.Cursor cursor = c.session().cursor("SELECT i FROM range(0, 200000) t(i)")) {
 
             int initialRows = cursor.materializedRowCount();
-            assertTrue(initialRows > 0,
-                    "PREPARE_RESPONSE should include at least one initial chunk");
+            if (c.session().protocolVersion() == 1) {
+                assertTrue(initialRows > 0, "V1 PREPARE_RESPONSE should include an initial chunk");
+            }
             assertTrue(initialRows < 200_000,
                     "cursor should not have materialized the full result up front; saw "
                             + initialRows + " rows already");

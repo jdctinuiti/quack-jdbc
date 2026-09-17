@@ -334,6 +334,28 @@ public final class VectorCodec {
 
         return switch (physicalType) {
             case VARCHAR -> {
+                if (reader.peekFieldId() == 107) {
+                    // DuckDB 2.0 stores string/blob lengths and bytes in separate buffers.
+                    int byteCount = reader.readRequiredField(107, reader::readUlebInt);
+                    byte[] lengthBytes = reader.readRequiredField(108, reader::readBlob);
+                    byte[] bytes = reader.readRequiredField(109, reader::readBlob);
+                    if (lengthBytes.length != (long) count * 4 || bytes.length != byteCount) {
+                        throw new QuackProtocolException("Invalid DuckDB 2.0 string vector buffer lengths");
+                    }
+                    BinaryReader lengths = new BinaryReader(lengthBytes);
+                    BinaryReader data = new BinaryReader(bytes);
+                    Object[] values = new Object[count];
+                    for (int i = 0; i < count; i++) {
+                        long length = lengths.readFixedUint32();
+                        if (length > data.remaining() || (!Validity.isValid(validity, i) && length != 0)) {
+                            throw new QuackProtocolException("Invalid DuckDB 2.0 string length " + length);
+                        }
+                        byte[] value = data.readBytes((int) length);
+                        values[i] = Validity.isValid(validity, i) ? decodeStringLikeValue(type, value) : null;
+                    }
+                    data.assertEof();
+                    yield new DecodedVector.ObjectVec(type, values);
+                }
                 List<byte[]> raw = reader.readRequiredField(102,
                         () -> reader.readList(i -> reader.readStringBytes()));
                 Object[] values = new Object[raw.size()];

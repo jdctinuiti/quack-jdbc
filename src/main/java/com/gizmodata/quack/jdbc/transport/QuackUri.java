@@ -133,6 +133,28 @@ public record QuackUri(String host,
         return parseDurationProperty("requestTimeout", QuackHttpTransport.DEFAULT_REQUEST_TIMEOUT);
     }
 
+    /** Zero means automatic negotiation; only the implemented v1 and v3 dialects are accepted. */
+    public int protocolVersion() {
+        String value = properties.getOrDefault("protocolVersion", "auto");
+        return switch (value) {
+            case "auto" -> 0;
+            case "1" -> 1;
+            case "3" -> 3;
+            default -> throw new QuackException("protocolVersion must be auto, 1, or 3");
+        };
+    }
+
+    public long heartbeatTimeoutSeconds() {
+        String value = properties.getOrDefault("heartbeatTimeout", "60");
+        try {
+            long seconds = Long.parseLong(value);
+            if (seconds > 0 && seconds <= Long.MAX_VALUE / 1000) return seconds;
+        } catch (NumberFormatException ignored) {
+        }
+        throw new QuackException("heartbeatTimeout must be a positive whole number of seconds <= "
+                + Long.MAX_VALUE / 1000);
+    }
+
     public String quackUri() {
         return "quack:" + host + ":" + port;
     }

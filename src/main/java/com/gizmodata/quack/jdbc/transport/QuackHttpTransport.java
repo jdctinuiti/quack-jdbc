@@ -128,7 +128,9 @@ public final class QuackHttpTransport implements QuackTransport {
                         .ifPresent(detail -> message.append(": ").append(detail));
                 throw new QuackException(message.toString());
             }
-            QuackMessage decoded = MessageCodec.decode(response.body());
+            long protocolVersion = request instanceof QuackMessage.FetchRequest fetch
+                    && fetch.batchIndex().isPresent() ? 3 : 1;
+            QuackMessage decoded = MessageCodec.decode(response.body(), protocolVersion);
             if (decoded instanceof QuackMessage.ErrorResponse err) {
                 throw new QuackServerException(err.message());
             }

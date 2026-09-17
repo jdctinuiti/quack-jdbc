@@ -88,6 +88,7 @@ public class QuackStatement extends SkeletalStatement {
             DataChunk first = cursor.peekFirstChunk();
             if (looksLikeRowsAffected(cursor, first)) {
                 updateCount = extractRowsAffected(first);
+                cursor.drainAll();
                 cursor.close();
                 currentResultSet = null;
                 return false;

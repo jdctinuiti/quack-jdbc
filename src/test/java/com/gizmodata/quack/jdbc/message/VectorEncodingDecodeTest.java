@@ -27,6 +27,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class VectorEncodingDecodeTest {
 
+    @Test
+    void duckdb2StringBuffersValidateLengthsAndDecodeUtf8() {
+        byte[] utf8 = "é".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        for (int declaredLength : new int[]{2, 1, 3}) {
+            BinaryWriter writer = new BinaryWriter();
+            writer.writeObject(obj -> {
+                obj.writeField(100, () -> obj.writeBool(false));
+                obj.writeField(107, () -> obj.writeUleb(utf8.length));
+                obj.writeField(108, () -> obj.writeBlob(le32(declaredLength)));
+                obj.writeField(109, () -> obj.writeBlob(utf8));
+            });
+            if (declaredLength == 2) {
+                assertEquals("é", decode(LogicalType.of(LogicalTypeId.VARCHAR), 1,
+                        writer.toByteArray()).getObject(0));
+            } else {
+                assertThrows(QuackProtocolException.class,
+                        () -> decode(LogicalType.of(LogicalTypeId.VARCHAR), 1, writer.toByteArray()));
+            }
+        }
+    }
+
     private static final LogicalType INT = LogicalType.of(LogicalTypeId.INTEGER);
     private static final LogicalType BIGINT = LogicalType.of(LogicalTypeId.BIGINT);
 
