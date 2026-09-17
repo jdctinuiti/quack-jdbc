@@ -1,12 +1,17 @@
 package com.gizmodata.quack.jdbc.it;
 
 import com.gizmodata.quack.jdbc.sql.QuackConnection;
+import com.gizmodata.quack.jdbc.message.DataChunk;
+import com.gizmodata.quack.jdbc.message.DecodedVector;
+import com.gizmodata.quack.jdbc.type.LogicalType;
+import com.gizmodata.quack.jdbc.type.LogicalTypeId;
 import org.junit.jupiter.api.*;
 import org.junit.jupiter.api.condition.EnabledIf;
 
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -96,6 +101,37 @@ class ProtocolV3IntegrationTest {
                 assertTrue(rows.next());
                 assertEquals(7, rows.getInt(1));
                 assertFalse(rows.next());
+            }
+        }
+    }
+
+    @Test
+    void appendReleasesBackpressuredFetchOnSameConnection() throws Exception {
+        try (QuackConnection connection = (QuackConnection) DriverManager.getConnection(
+                server.jdbcUrl() + "&requestTimeout=3");
+             Statement statement = connection.createStatement()) {
+            statement.execute("SET GLOBAL quack_fetch_producer_buffer_bytes = 16384");
+            try {
+                statement.execute("CREATE TABLE v3_append_after_fetch (id INTEGER)");
+                // Varying strings prevent the range from fitting in a single compressed batch.
+                try (ResultSet rows = statement.executeQuery(
+                        "SELECT i, md5(i::VARCHAR) FROM range(100000) t(i)")) {
+                    assertTrue(rows.next());
+                    LogicalType type = LogicalType.of(LogicalTypeId.INTEGER);
+                    DataChunk chunk = new DataChunk(1, List.of(type),
+                            List.of(new DecodedVector.IntVec(type, new int[]{42}, null)));
+                    connection.session().appendChunk("main", "v3_append_after_fetch", chunk);
+                }
+                try (ResultSet rows = statement.executeQuery("SELECT id FROM v3_append_after_fetch")) {
+                    assertTrue(rows.next());
+                    assertEquals(42, rows.getInt(1));
+                    assertFalse(rows.next());
+                }
+                statement.execute("DROP TABLE v3_append_after_fetch");
+            } finally {
+                if (!connection.session().isClosed()) {
+                    statement.execute("RESET GLOBAL quack_fetch_producer_buffer_bytes");
+                }
             }
         }
     }

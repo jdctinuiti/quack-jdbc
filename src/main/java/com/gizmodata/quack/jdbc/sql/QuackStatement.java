@@ -53,10 +53,9 @@ public class QuackStatement extends SkeletalStatement {
 
     @Override
     public void cancel() {
-        // Quack protocol has no in-flight cancel today. Treat as best-effort
-        // no-op so tools like DBeaver / DataGrip query-timeout buttons don't
-        // see an exception. A real cancel will follow when the protocol
-        // adds support.
+        // JDBC in-flight cancellation is not implemented. V3 CANCEL is currently
+        // used only for cursor cleanup and to release a fetch before bulk append.
+        // Keep this a best-effort no-op for DataGrip/DBeaver timeout buttons.
     }
 
     @Override

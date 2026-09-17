@@ -19,6 +19,8 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 ### Fixed
 
 - Queries and update counts when the server returns no inline result chunks.
+- Bulk append releases an active v3 fetch before starting the insert, so an
+  unconsumed result cannot block the insert's statement lock.
 - Integration fixtures now recognize absolute `QUACK_IT_DUCKDB` paths.
 
 ## [0.2.0-alpha.6] — 2026-07-29

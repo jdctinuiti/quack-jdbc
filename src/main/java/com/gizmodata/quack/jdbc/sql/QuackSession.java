@@ -225,8 +225,13 @@ public final class QuackSession implements AutoCloseable {
         }
         if (protocolVersion == 3) {
             HugeIntParts uuid = queryUuid();
-            activeQuery = null;
             try {
+                // SEND_DATA does not supersede a fetch producer as PREPARE does.
+                // Release its statement lock before the INSERT waits for that lock.
+                if (activeQuery != null) {
+                    expectSuccess(send(new QuackMessage.CancelRequest(header(MessageType.CANCEL_REQUEST), activeQuery)));
+                    activeQuery = null;
+                }
                 QuackMessage response = send(new QuackMessage.SendDataRequest(header(MessageType.APPEND_REQUEST),
                         Optional.ofNullable(schema), tableName, List.of(chunk), uuid));
                 if (!(response instanceof QuackMessage.SendDataResponse)) {

@@ -102,6 +102,31 @@ class QuackSessionProtocolTest {
     }
 
     @Test
+    void appendCancelsActiveFetchBeforeSendingData() {
+        Peer peer = new Peer();
+        try (QuackSession session = connect(peer, "?protocolVersion=3");
+             QuackSession.Cursor cursor = session.cursor("SELECT 42")) {
+            session.appendChunk("main", "target", ROW);
+            assertEquals(List.of(QuackMessage.CancelRequest.class, QuackMessage.SendDataRequest.class,
+                            QuackMessage.FinalizeMessage.class),
+                    peer.requests.subList(2, 5).stream().map(Object::getClass).toList());
+        }
+        assertEquals(1, peer.count(QuackMessage.CancelRequest.class));
+    }
+
+    @Test
+    void appendDoesNotStartWhenActiveFetchCannotBeCancelled() {
+        Peer peer = new Peer();
+        peer.failCancel = true;
+        try (QuackSession session = connect(peer, "?protocolVersion=3");
+             QuackSession.Cursor cursor = session.cursor("SELECT 42")) {
+            assertThrows(QuackServerException.class, () -> session.appendChunk("main", "target", ROW));
+            assertEquals(0, peer.count(QuackMessage.SendDataRequest.class));
+            assertTrue(session.isClosed());
+        }
+    }
+
+    @Test
     void sendsHeartbeatsAndStopsOnClose() throws Exception {
         Peer peer = new Peer();
         QuackSession session = connect(peer, "?protocolVersion=3&heartbeatTimeout=1");
@@ -149,6 +174,7 @@ class QuackSessionProtocolTest {
         boolean badIndex;
         boolean badTotal;
         boolean failHeartbeat;
+        boolean failCancel;
         long selectedVersion = 3;
 
         long count(Class<?> type) {
@@ -177,6 +203,12 @@ class QuackSessionProtocolTest {
                             List.of(ROW), Optional.empty(), Optional.of(badIndex ? 2L : 1L))
                         : new QuackMessage.FetchResponseV3(MessageHeader.of(MessageType.FETCH_RESPONSE),
                             List.of(), Optional.of(badTotal ? 2L : 1L), Optional.empty());
+            }
+            if (request instanceof QuackMessage.CancelRequest && failCancel) {
+                throw new QuackServerException("Cancellation failed");
+            }
+            if (request instanceof QuackMessage.SendDataRequest) {
+                return new QuackMessage.SendDataResponse(MessageHeader.of(MessageType.SEND_DATA_RESPONSE), Optional.empty());
             }
             if (request instanceof QuackMessage.HeartbeatRequest) {
                 if (count(QuackMessage.DisconnectMessage.class) != 0) heartbeatAfterDisconnect.countDown();
