@@ -37,6 +37,7 @@ public final class QuackSession implements AutoCloseable {
     private ScheduledExecutorService heartbeat;
     private volatile RuntimeException heartbeatFailure;
     private HugeIntParts activeQuery;
+    private Boolean streamAppend;
 
     public QuackSession(QuackUri uri, QuackTransport transport) {
         this.uri = Objects.requireNonNull(uri, "uri");
@@ -161,9 +162,17 @@ public final class QuackSession implements AutoCloseable {
     }
 
     private QuackMessage send(QuackMessage request) {
-        QuackMessage response = transport.send(request);
-        if (response instanceof QuackMessage.ErrorResponse error) throw new QuackServerException(error.message());
-        return response;
+        try {
+            QuackMessage response = transport.send(request);
+            if (response instanceof QuackMessage.ErrorResponse error) {
+                throw new QuackServerException(error.message(), error.exceptionType(), error.extraInfo(),
+                        error.mustInvalidate());
+            }
+            return response;
+        } catch (QuackServerException error) {
+            if (error.mustInvalidate()) close();
+            throw error;
+        }
     }
 
     private static void expectSuccess(QuackMessage response) {
@@ -205,8 +214,8 @@ public final class QuackSession implements AutoCloseable {
 
     /**
      * Append a {@link DataChunk} into {@code schema.tableName} via a Quack
-     * {@code APPEND_REQUEST} (v1), or {@code SEND_DATA} and {@code FINALIZE}
-     * (v3). The chunk's column count and types must
+     * {@code APPEND_REQUEST} (v1), legacy v3 {@code SEND_DATA}/{@code FINALIZE},
+     * or an October v3 prepared insert stream. The chunk's column count and types must
      * match the destination table; rows are appended atomically as a
      * single server-side batch.
      *
@@ -224,7 +233,6 @@ public final class QuackSession implements AutoCloseable {
             throw new QuackProtocolException("appendChunk: chunk is required");
         }
         if (protocolVersion == 3) {
-            HugeIntParts uuid = queryUuid();
             try {
                 // SEND_DATA does not supersede a fetch producer as PREPARE does.
                 // Release its statement lock before the INSERT waits for that lock.
@@ -232,6 +240,11 @@ public final class QuackSession implements AutoCloseable {
                     expectSuccess(send(new QuackMessage.CancelRequest(header(MessageType.CANCEL_REQUEST), activeQuery)));
                     activeQuery = null;
                 }
+                if (supportsStreamAppend()) {
+                    appendToStream(schema, tableName, chunk);
+                    return;
+                }
+                HugeIntParts uuid = queryUuid();
                 QuackMessage response = send(new QuackMessage.SendDataRequest(header(MessageType.APPEND_REQUEST),
                         Optional.ofNullable(schema), tableName, List.of(chunk), uuid));
                 if (!(response instanceof QuackMessage.SendDataResponse)) {
@@ -259,6 +272,75 @@ public final class QuackSession implements AutoCloseable {
                     "Expected SUCCESS_RESPONSE for APPEND, got "
                             + response.getClass().getSimpleName());
         }
+    }
+
+    private boolean supportsStreamAppend() {
+        if (streamAppend == null) {
+            // The protocol number stayed at 3 when SEND_DATA changed. Inspect the
+            // registered scan signature before writing; never try/replay an INSERT.
+            try (Cursor probe = cursor("SELECT parameter_types FROM duckdb_functions() "
+                    + "WHERE function_name='scan_data_from_quack_client' AND function_type='table'")) {
+                List<DataChunk> chunks = probe.drainAll();
+                if (chunks.size() != 1 || chunks.get(0).rowCount() != 1
+                        || chunks.get(0).columns().size() != 1
+                        || !(chunks.get(0).columns().get(0).getObject(0) instanceof List<?> signature)) {
+                    throw new QuackProtocolException("Invalid Quack stream capability response");
+                }
+                if (signature.equals(List.of("VARCHAR", "ANY", "BOOLEAN"))) streamAppend = true;
+                else if (signature.equals(List.of("VARCHAR"))) streamAppend = false;
+                else throw new QuackProtocolException("Unsupported Quack insert-stream signature " + signature);
+            }
+        }
+        return streamAppend;
+    }
+
+    private void appendToStream(String schema, String tableName, DataChunk chunk) {
+        String streamId = UUID.randomUUID().toString();
+        HugeIntParts uuid = queryUuid();
+        String target = schema == null || schema.isEmpty() ? quoteIdentifier(tableName)
+                : quoteIdentifier(schema) + "." + quoteIdentifier(tableName);
+        StringBuilder prototype = new StringBuilder("STRUCT(");
+        for (int i = 0; i < chunk.types().size(); i++) {
+            if (i != 0) prototype.append(", ");
+            prototype.append("col").append(i).append(' ').append(SqlTypeName.render(chunk.types().get(i)));
+        }
+        prototype.append(')');
+        String sql = "INSERT INTO " + target + " SELECT * FROM scan_data_from_quack_client("
+                + SqlLiteral.render(streamId) + ", NULL::" + prototype + ", ordered := true)";
+        activeQuery = uuid;
+        QuackMessage response = send(new QuackMessage.PrepareRequest(header(MessageType.PREPARE_REQUEST),
+                sql, Optional.of(uuid), Optional.of(0L)));
+        if (!(response instanceof QuackMessage.PrepareResponse prep) || !uuid.equals(prep.resultUuid())) {
+            throw new QuackProtocolException("Invalid PREPARE_RESPONSE for append stream");
+        }
+        try (Cursor result = new Cursor(this, prep)) {
+            long batches = chunk.rowCount() == 0 ? 0 : 1;
+            if (batches != 0) {
+                expectSendData(send(new QuackMessage.SendDataStreamRequest(header(MessageType.APPEND_REQUEST),
+                        streamId, List.of(chunk), Optional.empty(), Optional.of(1L))));
+            }
+            expectSendData(send(new QuackMessage.SendDataStreamRequest(header(MessageType.APPEND_REQUEST),
+                    streamId, List.of(), Optional.of(batches), Optional.empty())));
+            // SEND_DATA only accepts the bytes. Draining the statement surfaces late
+            // constraint errors and waits for commit before reporting append success.
+            List<DataChunk> rows = result.drainAll();
+            if (rows.size() != 1 || rows.get(0).rowCount() != 1 || rows.get(0).columns().size() != 1
+                    || !(rows.get(0).columns().get(0).getObject(0) instanceof Number changed)
+                    || changed.longValue() != chunk.rowCount()) {
+                throw new QuackProtocolException("Unexpected affected-row count for append stream");
+            }
+        }
+    }
+
+    private static void expectSendData(QuackMessage response) {
+        if (!(response instanceof QuackMessage.SendDataResponse)) {
+            throw new QuackProtocolException("Expected SEND_DATA_RESPONSE, got "
+                    + response.getClass().getSimpleName());
+        }
+    }
+
+    private static String quoteIdentifier(String identifier) {
+        return "\"" + identifier.replace("\"", "\"\"") + "\"";
     }
 
     @Override

@@ -8,6 +8,7 @@ import com.gizmodata.quack.jdbc.transport.QuackTransport;
 import com.gizmodata.quack.jdbc.transport.QuackUri;
 import com.gizmodata.quack.jdbc.type.LogicalType;
 import com.gizmodata.quack.jdbc.type.LogicalTypeId;
+import com.gizmodata.quack.jdbc.type.ExtraTypeInfo;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -107,9 +108,10 @@ class QuackSessionProtocolTest {
         try (QuackSession session = connect(peer, "?protocolVersion=3");
              QuackSession.Cursor cursor = session.cursor("SELECT 42")) {
             session.appendChunk("main", "target", ROW);
-            assertEquals(List.of(QuackMessage.CancelRequest.class, QuackMessage.SendDataRequest.class,
-                            QuackMessage.FinalizeMessage.class),
-                    peer.requests.subList(2, 5).stream().map(Object::getClass).toList());
+            assertInstanceOf(QuackMessage.CancelRequest.class, peer.requests.get(2));
+            assertInstanceOf(QuackMessage.PrepareRequest.class, peer.requests.get(3));
+            assertEquals(1, peer.count(QuackMessage.SendDataRequest.class));
+            assertEquals(1, peer.count(QuackMessage.FinalizeMessage.class));
         }
         assertEquals(1, peer.count(QuackMessage.CancelRequest.class));
     }
@@ -193,6 +195,14 @@ class QuackSessionProtocolTest {
             if (request instanceof QuackMessage.PrepareRequest prepare) {
                 HugeIntParts uuid = prepare.queryUuid().orElseThrow();
                 assertNotEquals(new HugeIntParts(0, 0), uuid);
+                if (prepare.sql().startsWith("SELECT parameter_types FROM duckdb_functions()")) {
+                    LogicalType signatureType = LogicalType.of(LogicalTypeId.LIST,
+                            new ExtraTypeInfo.ListInfo(LogicalType.of(LogicalTypeId.VARCHAR), Optional.empty()));
+                    DataChunk signature = new DataChunk(1, List.of(signatureType), List.of(
+                            new DecodedVector.ObjectVec(signatureType, new Object[]{List.of("VARCHAR")})));
+                    return new QuackMessage.PrepareResponse(MessageHeader.of(MessageType.PREPARE_RESPONSE),
+                            List.of(signatureType), List.of("parameter_types"), false, List.of(signature), uuid);
+                }
                 return new QuackMessage.PrepareResponse(MessageHeader.of(MessageType.PREPARE_RESPONSE),
                         List.of(INTEGER), List.of("answer"), true, List.of(), uuid);
             }

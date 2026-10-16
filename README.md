@@ -32,10 +32,13 @@ artifacts are needed only by the server used for integration tests.
 
 V3 connections send background heartbeats, use numbered fetches with completeness
 checks, acknowledge completed results, and cancel partially consumed results
-when closed. The driver also decodes DuckDB 2.0 string/blob vectors and uses
-`SEND_DATA` plus `FINALIZE` for `appendChunk()`. Close connections when finished
-to stop their heartbeat threads. A failed heartbeat invalidates the session;
-open a new connection rather than replaying a query or transaction automatically.
+when closed. The driver supports both the September and October 2026 v3 wire
+formats, including streamed results, bulk append and typed server errors.
+Before the first bulk append, it checks the server's supported stream signature
+with a read-only query. Queries and writes are not replayed to detect compatibility.
+Close connections when finished to stop their heartbeat threads. A failed
+heartbeat invalidates the session; open a new connection instead of replaying a
+query or transaction automatically.
 
 ## Quickstart
 
@@ -267,8 +270,10 @@ The directory must contain `quack.duckdb_extension`. If it contains
 `httpfs.duckdb_extension`, the fixture loads it first for the server's crypto
 provider. This mode uses `-unsigned` and does not install extensions from the
 network. V3-specific tests exercise sessions beyond their heartbeat lease,
-zero inline rows, multiple fetch batches, and string/blob decoding. Run the
-suite against a v1 server as well to verify compatibility during upgrades.
+zero inline rows, multiple fetch batches, and string/blob decoding. The suite
+also checks default-sized streams, bulk append before the first query,
+rollback and failed inserts. Run it against both v3 wire formats and a v1 server
+to verify compatibility during upgrades; the protocol number alone is not enough.
 
 Custom `QuackTransport` implementations must support concurrent heartbeat and
 query requests for v3. When decoding a response to a `FetchRequest` whose

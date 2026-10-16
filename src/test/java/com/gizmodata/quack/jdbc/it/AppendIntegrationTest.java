@@ -1,5 +1,6 @@
 package com.gizmodata.quack.jdbc.it;
 
+import com.gizmodata.quack.jdbc.QuackException;
 import com.gizmodata.quack.jdbc.message.DataChunk;
 import com.gizmodata.quack.jdbc.message.DecodedVector;
 import com.gizmodata.quack.jdbc.message.Validity;
@@ -27,6 +28,7 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -53,6 +55,131 @@ public class AppendIntegrationTest {
 
     private QuackConnection connect() throws SQLException {
         return (QuackConnection) DriverManager.getConnection(server.jdbcUrl());
+    }
+
+    @Test
+    void firstOperationCanAppendTypedAndNullableValues() throws Exception {
+        // Set up on another connection so append must work before this client's first query/fetch.
+        try (Connection setup = connect(); Statement statement = setup.createStatement()) {
+            statement.execute("CREATE TABLE jdbc_it_append_first ("
+                    + "id INTEGER, active BOOLEAN, amount BIGINT, label VARCHAR, payload BLOB)");
+        }
+
+        LogicalType intType = LogicalType.of(LogicalTypeId.INTEGER);
+        LogicalType boolType = LogicalType.of(LogicalTypeId.BOOLEAN);
+        LogicalType bigintType = LogicalType.of(LogicalTypeId.BIGINT);
+        LogicalType varcharType = LogicalType.of(LogicalTypeId.VARCHAR);
+        LogicalType blobType = LogicalType.of(LogicalTypeId.BLOB);
+        long[] boolValidity = Validity.allValid(4);
+        Validity.setNull(boolValidity, 2);
+        long[] bigintValidity = Validity.allValid(4);
+        Validity.setNull(bigintValidity, 1);
+        DataChunk chunk = new DataChunk(4,
+                List.of(intType, boolType, bigintType, varcharType, blobType),
+                List.of(
+                        new DecodedVector.IntVec(intType, new int[]{1, 2, 3, 4}, null),
+                        new DecodedVector.BoolVec(boolType,
+                                new boolean[]{true, false, false, true}, boolValidity),
+                        new DecodedVector.LongVec(bigintType,
+                                new long[]{9_007_199_254_740_993L, 0, -42, Long.MAX_VALUE}, bigintValidity),
+                        new DecodedVector.ObjectVec(varcharType,
+                                new Object[]{"héllo", null, "", "tail-世界"}),
+                        new DecodedVector.ObjectVec(blobType,
+                                new Object[]{new byte[]{0, (byte) 255, 10}, null, new byte[0], new byte[]{5}})));
+
+        try (QuackConnection connection = connect()) {
+            connection.session().appendChunk("main", "jdbc_it_append_first", chunk);
+
+            try (Statement statement = connection.createStatement();
+                 ResultSet rows = statement.executeQuery(
+                         "SELECT id, active, amount, label, payload FROM jdbc_it_append_first ORDER BY id")) {
+                Boolean[] expectedActive = {true, false, null, true};
+                Long[] expectedAmounts = {9_007_199_254_740_993L, null, -42L, Long.MAX_VALUE};
+                String[] expectedLabels = {"héllo", null, "", "tail-世界"};
+                byte[][] expectedPayloads = {new byte[]{0, (byte) 255, 10}, null, new byte[0], new byte[]{5}};
+                for (int row = 0; row < 4; row++) {
+                    assertTrue(rows.next());
+                    assertEquals(row + 1, rows.getInt(1));
+                    assertEquals(expectedActive[row], rows.getObject(2));
+                    assertEquals(expectedAmounts[row], rows.getObject(3));
+                    assertEquals(expectedLabels[row], rows.getString(4));
+                    assertArrayEquals(expectedPayloads[row], rows.getBytes(5));
+                }
+                assertFalse(rows.next());
+            }
+        } finally {
+            try (Connection cleanup = connect(); Statement statement = cleanup.createStatement()) {
+                statement.execute("DROP TABLE jdbc_it_append_first");
+            }
+        }
+    }
+
+    @Test
+    void appendToQuotedTableParticipatesInTransaction() throws Exception {
+        try (QuackConnection connection = connect(); Statement statement = connection.createStatement()) {
+            statement.execute("CREATE SCHEMA \"jdbc \"\"schema\"");
+            statement.execute("CREATE TABLE \"jdbc \"\"schema\".\"append \"\"table\" (id INTEGER)");
+            connection.setAutoCommit(false);
+            // Establish the JDBC transaction before calling the session's bulk API directly.
+            try (ResultSet rows = statement.executeQuery("SELECT 1")) {
+                assertTrue(rows.next());
+            }
+            LogicalType intType = LogicalType.of(LogicalTypeId.INTEGER);
+            DataChunk chunk = new DataChunk(2, List.of(intType),
+                    List.of(new DecodedVector.IntVec(intType, new int[]{7, 8}, null)));
+            connection.session().appendChunk("jdbc \"schema", "append \"table", chunk);
+            try (ResultSet rows = statement.executeQuery(
+                    "SELECT count(*) FROM \"jdbc \"\"schema\".\"append \"\"table\"")) {
+                assertTrue(rows.next());
+                assertEquals(2, rows.getInt(1));
+            }
+            connection.rollback();
+            connection.setAutoCommit(true);
+            try (ResultSet rows = statement.executeQuery(
+                    "SELECT count(*) FROM \"jdbc \"\"schema\".\"append \"\"table\"")) {
+                assertTrue(rows.next());
+                assertEquals(0, rows.getInt(1));
+            }
+        } finally {
+            try (Connection cleanup = connect(); Statement statement = cleanup.createStatement()) {
+                statement.execute("DROP SCHEMA \"jdbc \"\"schema\" CASCADE");
+            }
+        }
+    }
+
+    @Test
+    void failedAppendDoesNotCommitPartOfTheBatch() throws Exception {
+        try (Connection setup = connect(); Statement statement = setup.createStatement()) {
+            statement.execute("CREATE TABLE jdbc_it_append_atomic (id INTEGER PRIMARY KEY)");
+        }
+        LogicalType intType = LogicalType.of(LogicalTypeId.INTEGER);
+        DataChunk invalid = new DataChunk(3, List.of(intType),
+                List.of(new DecodedVector.IntVec(intType, new int[]{1, 2, 1}, null)));
+        try {
+            try (QuackConnection connection = connect()) {
+                assertThrows(QuackException.class,
+                        () -> connection.session().appendChunk("main", "jdbc_it_append_atomic", invalid));
+            }
+            // An uncertain append may close its session; inspect durable state from a new connection.
+            try (QuackConnection connection = connect(); Statement statement = connection.createStatement()) {
+                try (ResultSet rows = statement.executeQuery("SELECT count(*) FROM jdbc_it_append_atomic")) {
+                    assertTrue(rows.next());
+                    assertEquals(0, rows.getInt(1));
+                }
+                DataChunk valid = new DataChunk(1, List.of(intType),
+                        List.of(new DecodedVector.IntVec(intType, new int[]{3}, null)));
+                connection.session().appendChunk("main", "jdbc_it_append_atomic", valid);
+                try (ResultSet rows = statement.executeQuery("SELECT id FROM jdbc_it_append_atomic")) {
+                    assertTrue(rows.next());
+                    assertEquals(3, rows.getInt(1));
+                    assertFalse(rows.next());
+                }
+            }
+        } finally {
+            try (Connection cleanup = connect(); Statement statement = cleanup.createStatement()) {
+                statement.execute("DROP TABLE jdbc_it_append_atomic");
+            }
+        }
     }
 
     @Test

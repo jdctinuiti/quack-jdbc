@@ -19,7 +19,6 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpRequest.BodyPublishers;
 import java.net.http.HttpResponse;
 import java.net.http.HttpResponse.BodyHandlers;
-import java.nio.channels.ClosedChannelException;
 import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
@@ -108,7 +107,7 @@ public final class QuackHttpTransport implements QuackTransport {
             HttpResponse<byte[]> response;
             try {
                 response = httpClient.send(httpRequest, BodyHandlers.ofByteArray());
-            } catch (ConnectException | HttpConnectTimeoutException | ClosedChannelException e) {
+            } catch (ConnectException | HttpConnectTimeoutException e) {
                 lastFailure = e;
                 continue;
             } catch (IOException e) {
@@ -132,7 +131,7 @@ public final class QuackHttpTransport implements QuackTransport {
                     && fetch.batchIndex().isPresent() ? 3 : 1;
             QuackMessage decoded = MessageCodec.decode(response.body(), protocolVersion);
             if (decoded instanceof QuackMessage.ErrorResponse err) {
-                throw new QuackServerException(err.message());
+                throw new QuackServerException(err.message(), err.exceptionType(), err.extraInfo(), err.mustInvalidate());
             }
             return decoded;
         }
