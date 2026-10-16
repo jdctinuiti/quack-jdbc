@@ -12,16 +12,9 @@ familiar `jdbc:quack://` URL.
 [![GitHub Repo](https://img.shields.io/badge/github-gizmodata%2Fquack--jdbc-181717?logo=github)](https://github.com/gizmodata/quack-jdbc)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-> **Status:** Experimental / alpha. The Quack protocol itself shipped on
-> 2026-05-12 and will stabilize as part of DuckDB v2.0 in September 2026.
-> Expect breaking changes between now and then. As of DuckDB v1.5.3
-> ("Variegata"), `quack` ships as a **core** extension — no more
-> `core_nightly` repository needed. This driver is tested against the
-> `quack` extension bundled with DuckDB CLI v1.5.4, including a
-> parity suite that checks column-type reporting against DuckDB's own
-> JDBC driver (`duckdb_jdbc`) as a behavioral oracle.
+> **Status:** Experimental / alpha.
 
-The development driver supports both Quack **v1** (DuckDB 1.5.x) and
+The development driver supports Quack **v1** (DuckDB 1.5.x) and current upstream
 **v3** (DuckDB 2.0 development builds). The default `protocolVersion=auto`
 first sends a v1 handshake, then retries with v3 only when the server explicitly
 rejects v1 and requires v3. Authentication and HTTP failures are never retried
@@ -32,10 +25,12 @@ artifacts are needed only by the server used for integration tests.
 
 V3 connections send background heartbeats, use numbered fetches with completeness
 checks, acknowledge completed results, and cancel partially consumed results
-when closed. The driver also decodes DuckDB 2.0 string/blob vectors and uses
-`SEND_DATA` plus `FINALIZE` for `appendChunk()`. Close connections when finished
-to stop their heartbeat threads. A failed heartbeat invalidates the session;
-open a new connection rather than replaying a query or transaction automatically.
+when closed. The driver supports the current upstream v3 format, including
+streamed results, bulk append and typed server errors. Queries and writes are
+not replayed to detect compatibility.
+Close connections when finished to stop their heartbeat threads. A failed
+heartbeat invalidates the session; open a new connection instead of replaying a
+query or transaction automatically.
 
 ## Quickstart
 
@@ -267,8 +262,10 @@ The directory must contain `quack.duckdb_extension`. If it contains
 `httpfs.duckdb_extension`, the fixture loads it first for the server's crypto
 provider. This mode uses `-unsigned` and does not install extensions from the
 network. V3-specific tests exercise sessions beyond their heartbeat lease,
-zero inline rows, multiple fetch batches, and string/blob decoding. Run the
-suite against a v1 server as well to verify compatibility during upgrades.
+zero inline rows, multiple fetch batches, and string/blob decoding. The suite
+also checks default-sized streams, bulk append before the first query,
+rollback and failed inserts. Run it against current upstream v3 and a v1 server
+to verify compatibility. Earlier development versions of v3 are not supported.
 
 Custom `QuackTransport` implementations must support concurrent heartbeat and
 query requests for v3. When decoding a response to a `FetchRequest` whose

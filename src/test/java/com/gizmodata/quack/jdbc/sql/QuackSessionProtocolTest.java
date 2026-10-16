@@ -107,9 +107,10 @@ class QuackSessionProtocolTest {
         try (QuackSession session = connect(peer, "?protocolVersion=3");
              QuackSession.Cursor cursor = session.cursor("SELECT 42")) {
             session.appendChunk("main", "target", ROW);
-            assertEquals(List.of(QuackMessage.CancelRequest.class, QuackMessage.SendDataRequest.class,
-                            QuackMessage.FinalizeMessage.class),
-                    peer.requests.subList(2, 5).stream().map(Object::getClass).toList());
+            assertInstanceOf(QuackMessage.CancelRequest.class, peer.requests.get(2));
+            assertInstanceOf(QuackMessage.PrepareRequest.class, peer.requests.get(3));
+            assertEquals(2, peer.count(QuackMessage.SendDataRequest.class));
+            assertEquals(1, peer.count(QuackMessage.Acknowledgement.class));
         }
         assertEquals(1, peer.count(QuackMessage.CancelRequest.class));
     }
@@ -175,6 +176,7 @@ class QuackSessionProtocolTest {
         boolean badTotal;
         boolean failHeartbeat;
         boolean failCancel;
+        boolean inserting;
         long selectedVersion = 3;
 
         long count(Class<?> type) {
@@ -193,6 +195,7 @@ class QuackSessionProtocolTest {
             if (request instanceof QuackMessage.PrepareRequest prepare) {
                 HugeIntParts uuid = prepare.queryUuid().orElseThrow();
                 assertNotEquals(new HugeIntParts(0, 0), uuid);
+                inserting = prepare.sql().startsWith("INSERT INTO");
                 return new QuackMessage.PrepareResponse(MessageHeader.of(MessageType.PREPARE_RESPONSE),
                         List.of(INTEGER), List.of("answer"), true, List.of(), uuid);
             }
@@ -200,7 +203,9 @@ class QuackSessionProtocolTest {
                 long index = fetch.batchIndex().orElseThrow();
                 return index == 1
                         ? new QuackMessage.FetchResponseV3(MessageHeader.of(MessageType.FETCH_RESPONSE),
-                            List.of(ROW), Optional.empty(), Optional.of(badIndex ? 2L : 1L))
+                            List.of(inserting ? new DataChunk(1, List.of(INTEGER),
+                                    List.of(new DecodedVector.IntVec(INTEGER, new int[]{1}, null))) : ROW),
+                            Optional.empty(), Optional.of(badIndex ? 2L : 1L))
                         : new QuackMessage.FetchResponseV3(MessageHeader.of(MessageType.FETCH_RESPONSE),
                             List.of(), Optional.of(badTotal ? 2L : 1L), Optional.empty());
             }

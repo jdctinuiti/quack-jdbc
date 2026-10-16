@@ -12,12 +12,15 @@ adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   leases, client query UUIDs, numbered fetches with batch completeness checks,
   result acknowledgements, and cancellation of partially consumed results.
 - DuckDB 2.0 string/blob vector decoding, including nested string values.
-- V3 bulk append through `SEND_DATA` and `FINALIZE` while retaining v1 append.
+- Current upstream v3 result and bulk-append formats, while retaining v1 append.
 - `protocolVersion` and `heartbeatTimeout` connection properties, and
   `QUACK_IT_EXTENSION_DIR` for testing matching locally built server artifacts.
 
 ### Fixed
 
+- V3 typed server errors no longer break connection negotiation.
+- V3 streamed results and bulk inserts use the current chunk format.
+- A closed HTTP channel does not replay a request whose write outcome is unknown.
 - Queries and update counts when the server returns no inline result chunks.
 - Bulk append releases an active v3 fetch before starting the insert, so an
   unconsumed result cannot block the insert's statement lock.

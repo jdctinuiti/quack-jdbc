@@ -4,6 +4,7 @@ import com.gizmodata.quack.jdbc.codec.HugeIntParts;
 import com.gizmodata.quack.jdbc.type.LogicalType;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 public sealed interface QuackMessage {
@@ -37,7 +38,11 @@ public sealed interface QuackMessage {
         }
     }
 
-    record PrepareRequest(MessageHeader header, String sql, Optional<HugeIntParts> queryUuid) implements QuackMessage {
+    record PrepareRequest(MessageHeader header, String sql, Optional<HugeIntParts> queryUuid,
+                          Optional<Long> inlineRows) implements QuackMessage {
+        public PrepareRequest(MessageHeader header, String sql, Optional<HugeIntParts> queryUuid) {
+            this(header, sql, queryUuid, Optional.empty());
+        }
         public PrepareRequest(MessageHeader header, String sql) {
             this(header, sql, Optional.empty());
         }
@@ -61,7 +66,7 @@ public sealed interface QuackMessage {
                          List<DataChunk> results,
                          Optional<Long> batchIndex) implements QuackMessage {}
 
-    /** V3 uses field 2 for the terminal total and field 3 for a fixed-width batch index. */
+    /** V3 carries numbered chunk blobs after the message body. */
     record FetchResponseV3(MessageHeader header, List<DataChunk> results,
                            Optional<Long> totalBatches, Optional<Long> batchIndex) implements QuackMessage {}
 
@@ -70,13 +75,11 @@ public sealed interface QuackMessage {
                          String tableName,
                          DataChunk appendChunk) implements QuackMessage {}
 
-    /** One unordered insert batch; FINALIZE completes the statement, or DISCONNECT aborts the unfinished stream. */
-    record SendDataRequest(MessageHeader header, Optional<String> schemaName, String tableName,
-                           List<DataChunk> chunks, HugeIntParts queryUuid) implements QuackMessage {}
+    /** V3 sends numbered blobs to a stream registered by PREPARE; the terminal has only a total. */
+    record SendDataRequest(MessageHeader header, String streamId, List<DataChunk> chunks,
+                           Optional<Long> totalBatches, Optional<Long> batchIndex) implements QuackMessage {}
 
     record SendDataResponse(MessageHeader header, Optional<Long> acceptBudget) implements QuackMessage {}
-
-    record FinalizeMessage(MessageHeader header, HugeIntParts queryUuid) implements QuackMessage {}
 
     record Acknowledgement(MessageHeader header, HugeIntParts queryUuid) implements QuackMessage {}
 
@@ -88,5 +91,10 @@ public sealed interface QuackMessage {
 
     record DisconnectMessage(MessageHeader header) implements QuackMessage {}
 
-    record ErrorResponse(MessageHeader header, String message) implements QuackMessage {}
+    record ErrorResponse(MessageHeader header, String message, Optional<String> exceptionType,
+                         Map<String, String> extraInfo, boolean mustInvalidate) implements QuackMessage {
+        public ErrorResponse(MessageHeader header, String message) {
+            this(header, message, Optional.empty(), Map.of(), false);
+        }
+    }
 }

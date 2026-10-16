@@ -110,7 +110,7 @@ class ProtocolV3IntegrationTest {
         try (QuackConnection connection = (QuackConnection) DriverManager.getConnection(
                 server.jdbcUrl() + "&requestTimeout=3");
              Statement statement = connection.createStatement()) {
-            statement.execute("SET GLOBAL quack_fetch_producer_buffer_bytes = 16384");
+            statement.execute("SET GLOBAL quack_server_stream_buffer_bytes = 16384");
             try {
                 statement.execute("CREATE TABLE v3_append_after_fetch (id INTEGER)");
                 // Varying strings prevent the range from fitting in a single compressed batch.
@@ -130,7 +130,7 @@ class ProtocolV3IntegrationTest {
                 statement.execute("DROP TABLE v3_append_after_fetch");
             } finally {
                 if (!connection.session().isClosed()) {
-                    statement.execute("RESET GLOBAL quack_fetch_producer_buffer_bytes");
+                    statement.execute("RESET GLOBAL quack_server_stream_buffer_bytes");
                 }
             }
         }

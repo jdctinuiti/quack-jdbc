@@ -10,6 +10,8 @@ import com.gizmodata.quack.jdbc.type.LogicalTypeCodec;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Optional;
 
 public final class MessageCodec {
@@ -77,7 +79,6 @@ public final class MessageCodec {
         // Wire id 9 was APPEND_REQUEST in v1 and is SEND_DATA_REQUEST in v3.
         if (message instanceof QuackMessage.SendDataRequest) return MessageType.APPEND_REQUEST;
         if (message instanceof QuackMessage.SendDataResponse) return MessageType.SEND_DATA_RESPONSE;
-        if (message instanceof QuackMessage.FinalizeMessage) return MessageType.FINALIZE;
         if (message instanceof QuackMessage.Acknowledgement) return MessageType.ACKNOWLEDGEMENT;
         if (message instanceof QuackMessage.CancelRequest) return MessageType.CANCEL_REQUEST;
         if (message instanceof QuackMessage.HeartbeatRequest) return MessageType.HEARTBEAT_REQUEST;
@@ -115,6 +116,7 @@ public final class MessageCodec {
                     obj.writeField(1, () -> obj.writeString(m.sql()));
                 }
                 m.queryUuid().ifPresent(uuid -> obj.writeField(2, () -> obj.writeHugeInt(uuid)));
+                m.inlineRows().ifPresent(rows -> obj.writeField(3, () -> obj.writeUleb(rows)));
             });
             return;
         }
@@ -148,13 +150,11 @@ public final class MessageCodec {
         }
         if (message instanceof QuackMessage.FetchResponseV3 m) {
             writer.writeObject(obj -> {
-                if (!m.results().isEmpty()) obj.writeField(1, () -> writeChunkPointerList(obj, m.results()));
+                if (!m.results().isEmpty()) obj.writeField(1, () -> obj.writeUleb(m.results().size()));
                 m.totalBatches().ifPresent(total -> obj.writeField(2, () -> obj.writeUleb(total)));
-                obj.writeField(3, () -> {
-                    obj.writeUleb(8);
-                    obj.writeFixedInt64(m.batchIndex().orElse(0L));
-                });
+                m.batchIndex().ifPresent(index -> obj.writeField(3, () -> obj.writeUleb(index)));
             });
+            for (DataChunk chunk : m.results()) VectorCodec.encodeDataChunk(writer, chunk);
             return;
         }
         if (message instanceof QuackMessage.FetchResponse m) {
@@ -180,12 +180,12 @@ public final class MessageCodec {
         }
         if (message instanceof QuackMessage.SendDataRequest m) {
             writer.writeObject(obj -> {
-                writeOptionalString(obj, 1, m.schemaName());
-                obj.writeField(2, () -> obj.writeString(m.tableName()));
-                obj.writeField(3, () -> writeChunkPointerList(obj, m.chunks()));
-                obj.writeField(4, () -> obj.writeHugeInt(m.queryUuid()));
-                obj.writeField(5, () -> obj.writeUleb(QuackConstants.OPTIONAL_INDEX_INVALID));
+                obj.writeField(1, () -> obj.writeString(m.streamId()));
+                if (!m.chunks().isEmpty()) obj.writeField(2, () -> obj.writeUleb(m.chunks().size()));
+                m.totalBatches().ifPresent(total -> obj.writeField(3, () -> obj.writeUleb(total)));
+                m.batchIndex().ifPresent(index -> obj.writeField(4, () -> obj.writeUleb(index)));
             });
+            for (DataChunk chunk : m.chunks()) VectorCodec.encodeDataChunk(writer, chunk);
             return;
         }
         if (message instanceof QuackMessage.SendDataResponse m) {
@@ -193,8 +193,7 @@ public final class MessageCodec {
                     () -> obj.writeUleb(m.acceptBudget().orElse(QuackConstants.OPTIONAL_INDEX_INVALID))));
             return;
         }
-        HugeIntParts queryUuid = message instanceof QuackMessage.FinalizeMessage m ? m.queryUuid()
-                : message instanceof QuackMessage.Acknowledgement m ? m.queryUuid()
+        HugeIntParts queryUuid = message instanceof QuackMessage.Acknowledgement m ? m.queryUuid()
                 : message instanceof QuackMessage.CancelRequest m ? m.queryUuid() : null;
         if (queryUuid != null) {
             writer.writeObject(obj -> obj.writeField(1, () -> obj.writeHugeInt(queryUuid)));
@@ -211,6 +210,9 @@ public final class MessageCodec {
                 if (m.message() != null && !m.message().isEmpty()) {
                     obj.writeField(1, () -> obj.writeString(m.message()));
                 }
+                writeOptionalString(obj, 2, m.exceptionType());
+                if (!m.extraInfo().isEmpty()) obj.writeField(3, () -> writeStringMap(obj, m.extraInfo()));
+                if (m.mustInvalidate()) obj.writeField(4, () -> obj.writeBool(true));
             });
             return;
         }
@@ -239,7 +241,8 @@ public final class MessageCodec {
             case PREPARE_REQUEST -> reader.readObject(() -> new QuackMessage.PrepareRequest(
                     header,
                     reader.readOptionalField(1, reader::readString, ""),
-                    Optional.ofNullable(reader.readOptionalField(2, reader::readHugeInt, null))));
+                    Optional.ofNullable(reader.readOptionalField(2, reader::readHugeInt, null)),
+                    optionalIndex(reader.readOptionalField(3, reader::readUlebLong, -1L))));
             case PREPARE_RESPONSE -> reader.readObject(() -> {
                 List<LogicalType> resultTypes = reader.readOptionalField(1,
                         () -> reader.readList(i -> LogicalTypeCodec.decode(reader)), List.of());
@@ -257,43 +260,20 @@ public final class MessageCodec {
                     reader.readRequiredField(1, reader::readHugeInt),
                     Optional.ofNullable(reader.readOptionalField(2, reader::readUlebLong, null)),
                     Optional.ofNullable(reader.readOptionalField(3, reader::readUlebLong, null))));
-            case FETCH_RESPONSE -> reader.readObject(() -> {
+            case FETCH_RESPONSE -> protocolVersion == 3 ? decodeChunkBlobFetch(reader, header)
+                    : reader.readObject(() -> {
                 List<DataChunk> results = reader.readOptionalField(1,
                         () -> readChunkPointerList(reader), List.of());
-                if (protocolVersion == 3) {
-                    Optional<Long> total = optionalIndex(reader.readOptionalField(2, reader::readUlebLong, -1L));
-                    long fixedIndex = reader.readRequiredField(3, () -> {
-                        int length = reader.readUlebInt();
-                        if (length != 8) throw new QuackProtocolException("Invalid fixed batch index length " + length);
-                        return reader.readFixedInt64();
-                    });
-                    if (fixedIndex < 0) throw new QuackProtocolException("Invalid or unstamped fetch batch index");
-                    Optional<Long> index = fixedIndex == 0 ? Optional.empty() : Optional.of(fixedIndex);
-                    return new QuackMessage.FetchResponseV3(header, results, total, index);
-                }
                 long batchIndex = reader.readRequiredField(2, reader::readUlebLong);
-                Optional<Long> batchOpt = batchIndex == QuackConstants.OPTIONAL_INDEX_INVALID
-                        ? Optional.empty() : Optional.of(batchIndex);
-                return new QuackMessage.FetchResponse(header, results, batchOpt);
+                return new QuackMessage.FetchResponse(header, results, optionalIndex(batchIndex));
             });
-            case APPEND_REQUEST -> reader.readObject(() -> {
+            case APPEND_REQUEST -> protocolVersion == 3 ? decodeChunkBlobSend(reader, header)
+                    : reader.readObject(() -> {
                 Optional<String> schemaName = optionalString(reader, 1);
                 String tableName = reader.readOptionalField(2, reader::readString, "");
-                if (protocolVersion == 3) {
-                    List<DataChunk> chunks = reader.readOptionalField(3, () -> readChunkPointerList(reader), List.of());
-                    HugeIntParts uuid = reader.readRequiredField(4, reader::readHugeInt);
-                    long index = reader.readRequiredField(5, reader::readUlebLong);
-                    if (index != QuackConstants.OPTIONAL_INDEX_INVALID) {
-                        throw new QuackProtocolException("Only unordered SEND_DATA decoding is supported");
-                    }
-                    return new QuackMessage.SendDataRequest(header, schemaName, tableName, chunks, uuid);
-                }
                 DataChunk chunk = reader.readOptionalField(3,
-                        () -> reader.readNullable(() -> VectorCodec.decodeDataChunkWrapper(reader)),
-                        null);
-                if (chunk == null) {
-                    throw new QuackProtocolException("APPEND_REQUEST is missing append_chunk");
-                }
+                        () -> reader.readNullable(() -> VectorCodec.decodeDataChunkWrapper(reader)), null);
+                if (chunk == null) throw new QuackProtocolException("APPEND_REQUEST is missing append_chunk");
                 return new QuackMessage.AppendRequest(header, schemaName, tableName, chunk);
             });
             case SUCCESS_RESPONSE -> reader.readObject(() -> new QuackMessage.SuccessResponse(header));
@@ -301,18 +281,79 @@ public final class MessageCodec {
             case HEARTBEAT_REQUEST -> reader.readObject(() -> new QuackMessage.HeartbeatRequest(header));
             case SEND_DATA_RESPONSE -> reader.readObject(() -> new QuackMessage.SendDataResponse(header,
                     optionalIndex(reader.readRequiredField(1, reader::readUlebLong))));
-            case FINALIZE -> reader.readObject(() -> new QuackMessage.FinalizeMessage(header,
-                    reader.readRequiredField(1, reader::readHugeInt)));
             case ACKNOWLEDGEMENT -> reader.readObject(() -> new QuackMessage.Acknowledgement(header,
                     reader.readOptionalField(1, reader::readHugeInt, new HugeIntParts(0, 0))));
             case CANCEL_REQUEST -> reader.readObject(() -> new QuackMessage.CancelRequest(header,
                     reader.readRequiredField(1, reader::readHugeInt)));
             case ERROR_RESPONSE -> reader.readObject(() -> new QuackMessage.ErrorResponse(
                     header,
-                    reader.readOptionalField(1, reader::readString, "")));
+                    reader.readOptionalField(1, reader::readString, ""),
+                    optionalString(reader, 2),
+                    reader.readOptionalField(3, () -> readStringMap(reader), Map.of()),
+                    reader.readOptionalField(4, reader::readBool, false)));
             case INVALID -> throw new QuackProtocolException(
                     "Cannot decode message type " + header.type());
         };
+    }
+
+    private static QuackMessage.FetchResponseV3 decodeChunkBlobFetch(BinaryReader reader, MessageHeader header) {
+        int chunkCount = reader.readOptionalField(1, reader::readUlebInt, 0);
+        Optional<Long> total = optionalIndex(reader.readOptionalField(2, reader::readUlebLong, -1L));
+        Optional<Long> index = optionalIndex(reader.readOptionalField(3, reader::readUlebLong, -1L));
+        reader.readEndObject();
+        List<DataChunk> chunks = readChunkBlob(reader, chunkCount, total, index);
+        return new QuackMessage.FetchResponseV3(header, chunks, total, index);
+    }
+
+    private static QuackMessage.SendDataRequest decodeChunkBlobSend(BinaryReader reader, MessageHeader header) {
+        String streamId = reader.readRequiredField(1, reader::readString);
+        int chunkCount = reader.readOptionalField(2, reader::readUlebInt, 0);
+        Optional<Long> total = optionalIndex(reader.readOptionalField(3, reader::readUlebLong, -1L));
+        Optional<Long> index = optionalIndex(reader.readOptionalField(4, reader::readUlebLong, -1L));
+        reader.readEndObject();
+        if (streamId.isEmpty()) {
+            throw new QuackProtocolException("Missing Quack send stream");
+        }
+        List<DataChunk> chunks = readChunkBlob(reader, chunkCount, total, index);
+        return new QuackMessage.SendDataRequest(header, streamId, chunks, total, index);
+    }
+
+    private static List<DataChunk> readChunkBlob(BinaryReader reader, int chunkCount,
+                                                Optional<Long> total, Optional<Long> index) {
+        if (index.isPresent() == total.isPresent()
+                || index.isPresent() && (index.get() <= 0 || chunkCount == 0)
+                || total.isPresent() && (total.get() < 0 || chunkCount != 0)) {
+            throw new QuackProtocolException("Expected a nonempty Quack data batch or an empty terminal frame");
+        }
+        List<DataChunk> chunks = new ArrayList<>(Math.min(chunkCount, 1024));
+        for (int i = 0; i < chunkCount; i++) {
+            DataChunk chunk = VectorCodec.decodeDataChunk(reader);
+            if (chunk.rowCount() == 0) throw new QuackProtocolException("Empty Quack data chunk");
+            chunks.add(chunk);
+        }
+        return chunks;
+    }
+
+    private static Map<String, String> readStringMap(BinaryReader reader) {
+        int count = reader.readUlebInt();
+        Map<String, String> result = new LinkedHashMap<>();
+        for (int i = 0; i < count; i++) reader.readObject(() -> {
+            String key = reader.readRequiredField(0, reader::readString);
+            String value = reader.readRequiredField(1, reader::readString);
+            if (result.putIfAbsent(key, value) != null) {
+                throw new QuackProtocolException("Duplicate error detail " + key);
+            }
+            return null;
+        });
+        return Map.copyOf(result);
+    }
+
+    private static void writeStringMap(BinaryWriter writer, Map<String, String> values) {
+        writer.writeUleb(values.size());
+        for (Map.Entry<String, String> entry : values.entrySet()) writer.writeObject(obj -> {
+            obj.writeField(0, () -> obj.writeString(entry.getKey()));
+            obj.writeField(1, () -> obj.writeString(entry.getValue()));
+        });
     }
 
     private static Optional<String> optionalString(BinaryReader reader, int fieldId) {
